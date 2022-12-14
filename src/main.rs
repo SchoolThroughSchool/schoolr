@@ -1,16 +1,26 @@
 extern crate google_classroom1 as _classroom;
 
 use _classroom::{api::ListCoursesResponse, hyper, hyper_rustls, oauth2};
-use chrono::{naive::NaiveDateTime, NaiveDate};
 use color_eyre::Result;
-use rust_bert::pipelines::question_answering::{Answer, QaInput, QuestionAnsweringModel};
-use tokio::task::spawn_blocking;
-use tracing::{debug, info};
+use futures::future::join_all;
+use tracing::debug;
+
+type Classroom = _classroom::Classroom<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>>;
+
+mod course;
+use course::Course;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    {
+        let e = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+        std::env::set_var("RUST_LOG", format!("{e},cached_path=off"));
+    }
+
     tracing_subscriber::fmt::init();
     color_eyre::install()?;
+
+    debug!("getting credentials and authenticating");
 
     let key = oauth2::read_application_secret("credentials.json").await?;
     let auth = oauth2::InstalledFlowAuthenticator::builder(
@@ -33,6 +43,8 @@ async fn main() -> Result<()> {
         auth,
     );
 
+    debug!("getting courses");
+
     let c = hub.courses();
 
     let (
@@ -46,66 +58,16 @@ async fn main() -> Result<()> {
     };
     debug!("got {} courses", courses.len());
 
-    for course in courses {
-        let id = course.id.unwrap();
-        let name = course.name.unwrap();
-        info!("course: {name} (id: {id})",);
-
-        let work = if let Some(c) = c.course_work_list(&id).doit().await?.1.course_work {
-            c
-        } else {
-            continue;
-        };
-
-        for work in work {
-            let title = work.title.unwrap();
-            let due = if let Some(date) = work.due_date {
-                NaiveDate::from_ymd_opt(
-                    date.year.unwrap() as _,
-                    date.month.unwrap() as _,
-                    date.day.unwrap() as _,
-                )
-            } else if let Some(d) = work.description {
-                let title = title.clone();
-                spawn_blocking(|| due_from_desc(d, title).ok().flatten().map(|d| d.date())).await?
-            } else {
-                None
-            };
-
-            info!("{}: {:?}", title, due);
-        }
+    for course in join_all(courses.into_iter().map(|c| Course::new(c, hub.clone())))
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        serde_json::to_writer_pretty(
+            std::fs::File::create(format!("course-{}.json", course.id))?,
+            &course,
+        )?;
     }
-
-    // Classroom::list();
 
     Ok(())
-}
-
-fn due_from_desc(
-    desc: impl Into<String>,
-    title: impl Into<String>,
-) -> Result<Option<NaiveDateTime>> {
-    let qa_model = QuestionAnsweringModel::new(Default::default())?;
-
-    let question = String::from("When is it due?");
-
-    let Answer { answer, score, .. } = qa_model
-        .predict(
-            &[QaInput {
-                question,
-                context: format!("title: {}\ndescription: {}", title.into(), desc.into()),
-            }],
-            1,
-            32,
-        )
-        .pop()
-        .unwrap()
-        .pop()
-        .unwrap(); // unwrapping is okay here because they give us non-empty vectors
-
-    if score <= 0.5 {
-        Ok(None)
-    } else {
-        Ok(fuzzydate::parse(&answer))
-    }
 }
