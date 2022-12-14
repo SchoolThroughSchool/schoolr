@@ -10,5 +10,8 @@ rust-bert = "0.19.0"
 color-eyre = "0.6"
 fuzzydate = { git = "https://github.com/TheBotlyNoob/fuzzydate" }
 chrono = "0.4"
-yup-oauth2 = "8.1"
 tokio = { version = "1.23", features = ["macros", "rt-multi-thread"] }
+google-classroom1 = "*"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dirs = "4.0"
